@@ -211,7 +211,7 @@ export const paginationSchema = z.object({
 // ─── Env Validation ─────────────────────────────────
 export const envSchema = z.object({
   DATABASE_URL: z.string().url(),
-  REDIS_URL: z.string(),
+  REDIS_URL: z.string().optional(),
   JWT_SECRET: z.string().min(16),
   JWT_REFRESH_SECRET: z.string().min(16),
   PORT: z.coerce.number().default(5000),
