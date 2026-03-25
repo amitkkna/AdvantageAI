@@ -13,7 +13,7 @@ if (!parsed.success) {
 
 export const env = {
   DATABASE_URL: process.env.DATABASE_URL || 'postgresql://advantage:advantage_dev_2024@localhost:5450/advantage_db?schema=public',
-  REDIS_URL: process.env.REDIS_URL || 'redis://localhost:6379',
+  REDIS_URL: process.env.REDIS_URL || (process.env.NODE_ENV === 'production' ? '' : 'redis://localhost:6379'),
   JWT_SECRET: process.env.JWT_SECRET || 'dev-jwt-secret-change-in-production-32chars',
   JWT_REFRESH_SECRET: process.env.JWT_REFRESH_SECRET || 'dev-refresh-secret-change-in-production-32',
   PORT: parseInt(process.env.PORT || '5000', 10),

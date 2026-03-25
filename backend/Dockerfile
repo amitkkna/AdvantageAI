@@ -1,57 +1,44 @@
-# ---- Build Stage ----
 FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-# Copy root workspace files
+# Copy workspace manifests first for better layer caching.
 COPY package.json package-lock.json turbo.json tsconfig.base.json ./
+COPY packages/shared/package.json packages/shared/package.json
+COPY backend/package.json backend/package.json
 
-# Copy package sources
+# Install only the shared + backend workspace dependencies.
+RUN npm ci --workspace=@advantage/shared --workspace=@advantage/backend
+
+# Copy sources after dependency install.
 COPY packages/shared/ packages/shared/
 COPY backend/ backend/
 
-# Install all dependencies (workspace-aware)
-RUN npm ci --workspace=@advantage/shared --workspace=@advantage/backend
-
-# Generate Prisma client
+# Generate Prisma client and compile the backend.
 RUN cd backend && npx prisma generate
-
-# Build shared package
 RUN npm run build --workspace=@advantage/shared
-
-# Build backend
 RUN npm run build --workspace=@advantage/backend
 
-# ---- Production Stage ----
 FROM node:20-alpine AS production
 
 WORKDIR /app
 
-# Copy root workspace files
-COPY package.json package-lock.json ./
+ENV NODE_ENV=production
 
-# Copy shared package (built)
-COPY --from=builder /app/packages/shared/ packages/shared/
+# Reuse the installed workspace node_modules from the builder to keep runtime behavior identical.
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/package.json ./package.json
+COPY --from=builder /app/package-lock.json ./package-lock.json
+COPY --from=builder /app/packages/shared ./packages/shared
+COPY --from=builder /app/backend ./backend
 
-# Copy backend package.json and built files
-COPY --from=builder /app/backend/package.json backend/
-COPY --from=builder /app/backend/dist/ backend/dist/
-COPY --from=builder /app/backend/prisma/ backend/prisma/
-
-# Install production dependencies only
-RUN npm ci --workspace=@advantage/shared --workspace=@advantage/backend --omit=dev
-
-# Re-generate Prisma client for production
-RUN cd backend && npx prisma generate
-
-# Create uploads directory
-RUN mkdir -p backend/uploads
+# Ensure ephemeral upload directories exist inside the container.
+RUN mkdir -p /app/backend/uploads /app/backend/uploads/tmp
 
 WORKDIR /app/backend
 
 EXPOSE 5000
 
-# Health check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD wget -qO- http://localhost:5000/api/health || exit 1
 

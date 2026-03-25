@@ -12,48 +12,38 @@ steps:
       - '.'
     id: 'build-backend'
 
-  # ---- Build Web Image ----
-  - name: 'gcr.io/cloud-builders/docker'
-    args:
-      - 'build'
-      - '-t'
-      - 'gcr.io/$PROJECT_ID/advantage-web:$COMMIT_SHA'
-      - '-t'
-      - 'gcr.io/$PROJECT_ID/advantage-web:latest'
-      - '-f'
-      - 'web/Dockerfile'
-      - '--build-arg'
-      - 'NEXT_PUBLIC_API_URL=${_API_URL}'
-      - '--build-arg'
-      - 'NEXT_PUBLIC_GOOGLE_MAPS_API_KEY=${_GOOGLE_MAPS_API_KEY}'
-      - '.'
-    id: 'build-web'
-
   # ---- Push Backend Image ----
   - name: 'gcr.io/cloud-builders/docker'
     args: ['push', 'gcr.io/$PROJECT_ID/advantage-backend:$COMMIT_SHA']
-    id: 'push-backend'
+    id: 'push-backend-sha'
     waitFor: ['build-backend']
 
-  # ---- Push Web Image ----
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['push', 'gcr.io/$PROJECT_ID/advantage-web:$COMMIT_SHA']
-    id: 'push-web'
-    waitFor: ['build-web']
+    args: ['push', 'gcr.io/$PROJECT_ID/advantage-backend:latest']
+    id: 'push-backend-latest'
+    waitFor: ['build-backend']
 
-  # ---- Run Prisma Migrations ----
-  - name: 'gcr.io/cloud-builders/docker'
+  # ---- Run Prisma Migrations via Cloud Run Job ----
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: 'bash'
     args:
       - '-c'
       - |
-        docker run --rm \
-          -e DATABASE_URL=$$DATABASE_URL \
-          gcr.io/$PROJECT_ID/advantage-backend:$COMMIT_SHA \
-          npx prisma migrate deploy
-    secretEnv: ['DATABASE_URL']
+        gcloud run jobs deploy advantage-migrate \
+          --image gcr.io/$PROJECT_ID/advantage-backend:$COMMIT_SHA \
+          --region ${_REGION} \
+          --tasks 1 \
+          --max-retries 0 \
+          --set-secrets DATABASE_URL=advantage-database-url:latest \
+          --add-cloudsql-instances ${_CLOUD_SQL_INSTANCE} \
+          --command npx \
+          --args prisma,migrate,deploy,--schema=prisma/schema.prisma
+
+        gcloud run jobs execute advantage-migrate \
+          --region ${_REGION} \
+          --wait
     id: 'migrate'
-    waitFor: ['push-backend']
+    waitFor: ['push-backend-sha']
 
   # ---- Deploy Backend to Cloud Run ----
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -80,58 +70,86 @@ steps:
       - '--max-instances'
       - '3'
       - '--set-secrets'
-      - 'DATABASE_URL=advantage-database-url:latest,REDIS_URL=advantage-redis-url:latest,JWT_SECRET=advantage-jwt-secret:latest,JWT_REFRESH_SECRET=advantage-jwt-refresh-secret:latest,ANTHROPIC_API_KEY=advantage-anthropic-key:latest,NEXT_PUBLIC_GOOGLE_MAPS_API_KEY=advantage-google-maps-key:latest'
+      - 'DATABASE_URL=advantage-database-url:latest,JWT_SECRET=advantage-jwt-secret:latest,JWT_REFRESH_SECRET=advantage-jwt-refresh-secret:latest,ANTHROPIC_API_KEY=advantage-anthropic-key:latest,GOOGLE_MAPS_API_KEY=advantage-google-maps-key:latest'
       - '--set-env-vars'
-      - 'NODE_ENV=production,PORT=5000'
+      - 'NODE_ENV=production,PORT=5000,REDIS_URL=${_REDIS_URL},CORS_ORIGINS=${_WEB_ORIGINS}'
       - '--add-cloudsql-instances'
       - '${_CLOUD_SQL_INSTANCE}'
     id: 'deploy-backend'
     waitFor: ['migrate']
 
+  # ---- Resolve Backend URL for Web Build ----
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        gcloud run services describe advantage-backend \
+          --region ${_REGION} \
+          --format='value(status.url)' > /workspace/backend_url.txt
+    id: 'resolve-backend-url'
+    waitFor: ['deploy-backend']
+
+  # ---- Build Web Image ----
+  - name: 'gcr.io/cloud-builders/docker'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        BACKEND_URL="$(cat /workspace/backend_url.txt)"
+        docker build \
+          -t gcr.io/$PROJECT_ID/advantage-web:$COMMIT_SHA \
+          -t gcr.io/$PROJECT_ID/advantage-web:latest \
+          -f web/Dockerfile \
+          --build-arg NEXT_PUBLIC_API_URL="${BACKEND_URL}/api" \
+          --build-arg NEXT_PUBLIC_GOOGLE_MAPS_API_KEY="${_NEXT_PUBLIC_GOOGLE_MAPS_API_KEY}" \
+          .
+    id: 'build-web'
+    waitFor: ['resolve-backend-url']
+
+  # ---- Push Web Image ----
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/advantage-web:$COMMIT_SHA']
+    id: 'push-web-sha'
+    waitFor: ['build-web']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/advantage-web:latest']
+    id: 'push-web-latest'
+    waitFor: ['build-web']
+
   # ---- Deploy Web to Cloud Run ----
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    entrypoint: 'gcloud'
+    entrypoint: 'bash'
     args:
-      - 'run'
-      - 'deploy'
-      - 'advantage-web'
-      - '--image'
-      - 'gcr.io/$PROJECT_ID/advantage-web:$COMMIT_SHA'
-      - '--region'
-      - '${_REGION}'
-      - '--platform'
-      - 'managed'
-      - '--allow-unauthenticated'
-      - '--port'
-      - '3000'
-      - '--memory'
-      - '512Mi'
-      - '--cpu'
-      - '1'
-      - '--min-instances'
-      - '0'
-      - '--max-instances'
-      - '3'
-      - '--set-env-vars'
-      - 'NODE_ENV=production,NEXT_PUBLIC_API_URL=${_API_URL}'
+      - '-c'
+      - |
+        BACKEND_URL="$(cat /workspace/backend_url.txt)"
+        gcloud run deploy advantage-web \
+          --image gcr.io/$PROJECT_ID/advantage-web:$COMMIT_SHA \
+          --region ${_REGION} \
+          --platform managed \
+          --allow-unauthenticated \
+          --port 3000 \
+          --memory 512Mi \
+          --cpu 1 \
+          --min-instances 0 \
+          --max-instances 3 \
+          --set-env-vars "NODE_ENV=production,NEXT_PUBLIC_API_URL=${BACKEND_URL}/api"
     id: 'deploy-web'
-    waitFor: ['push-web']
+    waitFor: ['push-web-sha']
 
 substitutions:
   _REGION: 'asia-south1'
-  _API_URL: 'https://advantage-backend-XXXXX-el.a.run.app'
-  _GOOGLE_MAPS_API_KEY: ''
   _CLOUD_SQL_INSTANCE: ''
-
-availableSecrets:
-  secretManager:
-    - versionName: projects/$PROJECT_ID/secrets/advantage-database-url/versions/latest
-      env: 'DATABASE_URL'
+  _WEB_ORIGINS: ''
+  _REDIS_URL: ''
+  _NEXT_PUBLIC_GOOGLE_MAPS_API_KEY: ''
 
 images:
   - 'gcr.io/$PROJECT_ID/advantage-backend:$COMMIT_SHA'
-  - 'gcr.io/$PROJECT_ID/advantage-web:$COMMIT_SHA'
   - 'gcr.io/$PROJECT_ID/advantage-backend:latest'
+  - 'gcr.io/$PROJECT_ID/advantage-web:$COMMIT_SHA'
   - 'gcr.io/$PROJECT_ID/advantage-web:latest'
 
 options:

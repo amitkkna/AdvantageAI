@@ -1,33 +1,59 @@
-# AdVantage AI - Google Cloud Deployment Guide
+# AdVantage AI on Google Cloud
 
-## Prerequisites
+This repo is set up to run on:
 
-1. [Google Cloud SDK](https://cloud.google.com/sdk/docs/install) installed
-2. A GCP project created
-3. Billing enabled on the project
-4. Docker installed locally (for testing)
+- `Cloud Run` for `advantage-backend`
+- `Cloud Run` for `advantage-web`
+- `Cloud SQL for PostgreSQL` for the database
+- `Secret Manager` for secrets
+- `Cloud Build` for CI/CD
+- optional `Memorystore (Redis)` for cache
 
-## Step 1: Initial GCP Setup
+## What Was Prepared In This Repo
+
+- [cloudbuild.yaml](./cloudbuild.yaml) now deploys the backend first, reads the backend Cloud Run URL automatically, then builds and deploys the web app with the correct `NEXT_PUBLIC_API_URL`.
+- [backend/Dockerfile](./backend/Dockerfile) now uses a more reliable workspace runtime image for Cloud Run and Cloud Run Jobs.
+- [packages/shared/package.json](./packages/shared/package.json) now points runtime imports at built JS in `dist`.
+- [.gcloudignore](./.gcloudignore) excludes local junk from Cloud Build uploads.
+
+## Important Production Notes
+
+1. File uploads are still local-disk by default unless S3 credentials are configured.
+   Cloud Run storage is ephemeral, so for production you should use the existing S3 upload flow in [backend/src/routes/upload.ts](./backend/src/routes/upload.ts).
+
+2. Redis is optional.
+   If you do not want Memorystore, leave `_REDIS_URL` empty in Cloud Build. The backend now runs without cache when `REDIS_URL` is unset.
+
+3. The web app currently builds with `typescript.ignoreBuildErrors = true` in [web/next.config.js](./web/next.config.js).
+   That is acceptable for deployment, but you should clean up the remaining UI typing issues later.
+
+## Step 1: Set Your Project
 
 ```bash
-# Login and set project
 gcloud auth login
 gcloud config set project YOUR_PROJECT_ID
+```
 
-# Enable required APIs
+## Step 2: Enable APIs
+
+```bash
 gcloud services enable \
   cloudbuild.googleapis.com \
   run.googleapis.com \
   sqladmin.googleapis.com \
-  redis.googleapis.com \
   secretmanager.googleapis.com \
   containerregistry.googleapis.com
 ```
 
-## Step 2: Create Cloud SQL (PostgreSQL with PostGIS)
+Optional if you want Redis:
 
 ```bash
-# Create PostgreSQL instance (db-f1-micro = cheapest, ~$8/mo)
+gcloud services enable redis.googleapis.com
+```
+
+## Step 3: Create Cloud SQL
+
+```bash
 gcloud sql instances create advantage-db \
   --database-version=POSTGRES_16 \
   --tier=db-f1-micro \
@@ -35,65 +61,46 @@ gcloud sql instances create advantage-db \
   --storage-size=10GB \
   --storage-auto-increase
 
-# Set password
-gcloud sql users set-password postgres \
-  --instance=advantage-db \
-  --password=YOUR_STRONG_PASSWORD
-
-# Create database user
 gcloud sql users create advantage \
   --instance=advantage-db \
-  --password=YOUR_STRONG_PASSWORD
+  --password=YOUR_DB_PASSWORD
 
-# Create database
 gcloud sql databases create advantage_db \
   --instance=advantage-db
-
-# Enable PostGIS (connect via Cloud SQL proxy or console)
-# Run this SQL: CREATE EXTENSION IF NOT EXISTS postgis;
-
-# Get connection name (you'll need this)
-gcloud sql instances describe advantage-db --format='value(connectionName)'
-# Output: YOUR_PROJECT_ID:asia-south1:advantage-db
 ```
 
-## Step 3: Create Memorystore (Redis)
+Get the instance connection name:
 
 ```bash
-# Create Redis instance (1GB basic = ~$35/mo)
-gcloud redis instances create advantage-redis \
-  --size=1 \
-  --region=asia-south1 \
-  --redis-version=redis_7_0 \
-  --tier=basic
-
-# Get the IP address
-gcloud redis instances describe advantage-redis \
-  --region=asia-south1 \
-  --format='value(host)'
+gcloud sql instances describe advantage-db \
+  --format='value(connectionName)'
 ```
 
-> **Cost-saving alternative**: Skip Memorystore and use in-memory caching in the backend. This saves ~$35/mo but loses cache persistence across restarts.
+Expected format:
 
-## Step 4: Store Secrets in Secret Manager
+```text
+YOUR_PROJECT_ID:asia-south1:advantage-db
+```
+
+## Step 4: Create Secrets
+
+Database URL:
 
 ```bash
-# Database URL (use Cloud SQL socket path)
-echo -n "postgresql://advantage:YOUR_PASSWORD@/advantage_db?host=/cloudsql/YOUR_PROJECT_ID:asia-south1:advantage-db" | \
+echo -n "postgresql://advantage:YOUR_DB_PASSWORD@/advantage_db?host=/cloudsql/YOUR_PROJECT_ID:asia-south1:advantage-db" | \
   gcloud secrets create advantage-database-url --data-file=-
+```
 
-# Redis URL
-echo -n "redis://REDIS_IP:6379" | \
-  gcloud secrets create advantage-redis-url --data-file=-
+JWT secrets:
 
-# JWT Secrets (generate strong ones!)
-openssl rand -base64 48 | \
-  gcloud secrets create advantage-jwt-secret --data-file=-
+```bash
+openssl rand -base64 48 | gcloud secrets create advantage-jwt-secret --data-file=-
+openssl rand -base64 48 | gcloud secrets create advantage-jwt-refresh-secret --data-file=-
+```
 
-openssl rand -base64 48 | \
-  gcloud secrets create advantage-jwt-refresh-secret --data-file=-
+API keys:
 
-# API Keys
+```bash
 echo -n "your-anthropic-api-key" | \
   gcloud secrets create advantage-anthropic-key --data-file=-
 
@@ -101,22 +108,51 @@ echo -n "your-google-maps-api-key" | \
   gcloud secrets create advantage-google-maps-key --data-file=-
 ```
 
-## Step 5: Grant Permissions
+## Step 5: Optional Redis
+
+If you want Redis:
+
+```bash
+gcloud redis instances create advantage-redis \
+  --size=1 \
+  --region=asia-south1 \
+  --redis-version=redis_7_0 \
+  --tier=basic
+
+gcloud redis instances describe advantage-redis \
+  --region=asia-south1 \
+  --format='value(host)'
+```
+
+Use the resulting host to form:
+
+```text
+redis://REDIS_IP:6379
+```
+
+If you do not want Redis, skip Memorystore and keep `_REDIS_URL` empty in Cloud Build.
+
+## Step 6: Grant IAM Permissions
 
 ```bash
 PROJECT_NUMBER=$(gcloud projects describe YOUR_PROJECT_ID --format='value(projectNumber)')
+```
 
-# Grant Cloud Run access to secrets
+Cloud Run service account access:
+
+```bash
 gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
   --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
   --role="roles/secretmanager.secretAccessor"
 
-# Grant Cloud Run access to Cloud SQL
 gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
   --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
   --role="roles/cloudsql.client"
+```
 
-# Grant Cloud Build permission to deploy to Cloud Run
+Cloud Build deployment access:
+
+```bash
 gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
   --member="serviceAccount:${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com" \
   --role="roles/run.admin"
@@ -126,139 +162,111 @@ gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
   --role="roles/iam.serviceAccountUser"
 ```
 
-## Step 6: Build & Deploy (Manual First Time)
+## Step 7: First Deploy With Cloud Build
+
+From the repo root, run:
 
 ```bash
-# From the project root directory:
-
-# Build and push backend image
 gcloud builds submit \
-  --tag gcr.io/YOUR_PROJECT_ID/advantage-backend \
-  -f backend/Dockerfile .
+  --config cloudbuild.yaml \
+  --substitutions=_REGION=asia-south1,_CLOUD_SQL_INSTANCE=YOUR_PROJECT_ID:asia-south1:advantage-db,_WEB_ORIGINS=https://YOUR_WEB_DOMAIN_OR_LEAVE_EMPTY,_REDIS_URL=redis://REDIS_IP:6379,_NEXT_PUBLIC_GOOGLE_MAPS_API_KEY=YOUR_GOOGLE_MAPS_KEY
+```
 
-# Build and push web image
+If you are not using Redis:
+
+```bash
 gcloud builds submit \
-  --tag gcr.io/YOUR_PROJECT_ID/advantage-web \
-  --build-arg NEXT_PUBLIC_API_URL=https://advantage-backend-XXXXX-el.a.run.app \
-  -f web/Dockerfile .
+  --config cloudbuild.yaml \
+  --substitutions=_REGION=asia-south1,_CLOUD_SQL_INSTANCE=YOUR_PROJECT_ID:asia-south1:advantage-db,_WEB_ORIGINS=https://YOUR_WEB_DOMAIN_OR_LEAVE_EMPTY,_REDIS_URL=,_NEXT_PUBLIC_GOOGLE_MAPS_API_KEY=YOUR_GOOGLE_MAPS_KEY
+```
 
-# Deploy backend to Cloud Run
-gcloud run deploy advantage-backend \
-  --image gcr.io/YOUR_PROJECT_ID/advantage-backend \
-  --region asia-south1 \
-  --platform managed \
-  --allow-unauthenticated \
-  --port 5000 \
-  --memory 512Mi \
-  --cpu 1 \
-  --min-instances 0 \
-  --max-instances 3 \
-  --set-secrets "DATABASE_URL=advantage-database-url:latest,REDIS_URL=advantage-redis-url:latest,JWT_SECRET=advantage-jwt-secret:latest,JWT_REFRESH_SECRET=advantage-jwt-refresh-secret:latest,ANTHROPIC_API_KEY=advantage-anthropic-key:latest,NEXT_PUBLIC_GOOGLE_MAPS_API_KEY=advantage-google-maps-key:latest" \
-  --set-env-vars "NODE_ENV=production,PORT=5000,CORS_ORIGINS=https://advantage-web-XXXXX-el.a.run.app" \
-  --add-cloudsql-instances YOUR_PROJECT_ID:asia-south1:advantage-db
+What this pipeline does:
 
-# Get the backend URL
+1. Builds and pushes the backend image
+2. Runs `prisma migrate deploy` as a Cloud Run Job
+3. Deploys the backend service
+4. Reads the live backend URL
+5. Builds the web image with `NEXT_PUBLIC_API_URL=<backend-url>/api`
+6. Deploys the web service
+
+## Step 8: Get URLs
+
+Backend:
+
+```bash
 gcloud run services describe advantage-backend \
   --region asia-south1 \
   --format='value(status.url)'
+```
 
-# Now rebuild web with the actual backend URL, then deploy:
-gcloud run deploy advantage-web \
-  --image gcr.io/YOUR_PROJECT_ID/advantage-web \
+Web:
+
+```bash
+gcloud run services describe advantage-web \
   --region asia-south1 \
-  --platform managed \
-  --allow-unauthenticated \
-  --port 3000 \
-  --memory 512Mi \
-  --cpu 1 \
-  --min-instances 0 \
-  --max-instances 3 \
-  --set-env-vars "NODE_ENV=production"
+  --format='value(status.url)'
 ```
 
-## Step 7: Run Database Migrations & Seed
+## Step 9: Create CI/CD Trigger
+
+In Cloud Build, create a GitHub trigger for branch `main` using [cloudbuild.yaml](./cloudbuild.yaml).
+
+Use these substitutions:
+
+- `_REGION=asia-south1`
+- `_CLOUD_SQL_INSTANCE=YOUR_PROJECT_ID:asia-south1:advantage-db`
+- `_WEB_ORIGINS=https://your-web-domain-or-cloud-run-url`
+- `_REDIS_URL=redis://REDIS_IP:6379` or empty
+- `_NEXT_PUBLIC_GOOGLE_MAPS_API_KEY=your-google-maps-key`
+
+## Custom Domain
+
+Web:
 
 ```bash
-# Use Cloud SQL Auth Proxy locally to run migrations
-# Install: https://cloud.google.com/sql/docs/postgres/connect-auth-proxy
-
-# Start proxy (in another terminal)
-cloud-sql-proxy YOUR_PROJECT_ID:asia-south1:advantage-db --port=5433
-
-# Run migrations
-DATABASE_URL="postgresql://advantage:YOUR_PASSWORD@localhost:5433/advantage_db" \
-  npx prisma migrate deploy --schema=backend/prisma/schema.prisma
-
-# Seed (optional - for demo data)
-DATABASE_URL="postgresql://advantage:YOUR_PASSWORD@localhost:5433/advantage_db" \
-  npm run db:seed
-```
-
-## Step 8: Set Up CI/CD (Optional)
-
-```bash
-# Connect your GitHub repo to Cloud Build
-# Go to: https://console.cloud.google.com/cloud-build/triggers
-
-# Create a trigger:
-# - Source: your GitHub repo
-# - Branch: main
-# - Config: cloudbuild.yaml
-# - Substitution variables:
-#   _REGION=asia-south1
-#   _API_URL=https://advantage-backend-XXXXX-el.a.run.app
-#   _GOOGLE_MAPS_API_KEY=(your key)
-#   _CLOUD_SQL_INSTANCE=YOUR_PROJECT_ID:asia-south1:advantage-db
-```
-
-## Step 9: Custom Domain (Optional)
-
-```bash
-# Map a custom domain to Cloud Run
 gcloud run domain-mappings create \
   --service advantage-web \
   --domain app.yourdomain.com \
   --region asia-south1
+```
 
+Backend:
+
+```bash
 gcloud run domain-mappings create \
   --service advantage-backend \
   --domain api.yourdomain.com \
   --region asia-south1
-
-# Follow DNS instructions from the output
 ```
 
-## Estimated Monthly Costs
-
-| Service | Tier | Cost |
-|---------|------|------|
-| Cloud Run (backend) | 512Mi, 0-3 instances | ~$5-10 |
-| Cloud Run (web) | 512Mi, 0-3 instances | ~$5-10 |
-| Cloud SQL (PostgreSQL) | db-f1-micro, 10GB | ~$8-10 |
-| Memorystore (Redis) | 1GB basic | ~$35 |
-| Container Registry | Storage | ~$1-2 |
-| **Total** | | **~$55-67/mo** |
-
-> Cloud Run has a generous free tier: 2M requests/mo, 360K vCPU-seconds, 180K GiB-seconds free.
+If you use a custom web domain, update `_WEB_ORIGINS` in Cloud Build to that exact origin.
 
 ## Useful Commands
 
+Logs:
+
 ```bash
-# View logs
 gcloud run services logs read advantage-backend --region asia-south1
 gcloud run services logs read advantage-web --region asia-south1
+```
 
-# View service status
-gcloud run services describe advantage-backend --region asia-south1
-gcloud run services describe advantage-web --region asia-south1
+Run migrations manually:
 
-# Update environment variable
+```bash
+gcloud run jobs execute advantage-migrate --region asia-south1 --wait
+```
+
+Update backend allowed web origins:
+
+```bash
 gcloud run services update advantage-backend \
   --region asia-south1 \
-  --update-env-vars "KEY=VALUE"
+  --update-env-vars CORS_ORIGINS=https://app.yourdomain.com
+```
 
-# Scale to zero (cost savings when idle)
-gcloud run services update advantage-backend \
-  --region asia-south1 \
-  --min-instances 0
+Scale to zero:
+
+```bash
+gcloud run services update advantage-backend --region asia-south1 --min-instances 0
+gcloud run services update advantage-web --region asia-south1 --min-instances 0
 ```
