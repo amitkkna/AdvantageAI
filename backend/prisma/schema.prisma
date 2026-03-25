@@ -1,0 +1,578 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Enums ───────────────────────────────────────────
+
+enum UserRole {
+  ADMIN
+  SALES
+  FIELD
+  FINANCE
+  CLIENT
+}
+
+enum AssetType {
+  BILLBOARD
+  UNIPOLE
+  HOARDING
+  BUS_SHELTER
+  GANTRY
+  DIGITAL_SCREEN
+  WALL_WRAP
+  POLE_KIOSK
+}
+
+enum AssetStatus {
+  AVAILABLE
+  PARTIALLY_BOOKED
+  FULLY_BOOKED
+  MAINTENANCE
+  INACTIVE
+}
+
+enum LightingType {
+  FRONT_LIT
+  BACK_LIT
+  NON_LIT
+  DIGITAL
+}
+
+enum CampaignStatus {
+  DRAFT
+  PROPOSAL_SENT
+  CLIENT_APPROVED
+  CREATIVE_PENDING
+  CREATIVE_APPROVED
+  LIVE
+  COMPLETED
+  CANCELLED
+}
+
+enum BookingStatus {
+  HOLD
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+}
+
+enum CreativeStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  REVISION_REQUESTED
+}
+
+enum ProposalStatus {
+  DRAFT
+  SENT
+  VIEWED
+  APPROVED
+  REJECTED
+}
+
+enum EnquiryStatus {
+  NEW
+  CONTACTED
+  QUALIFIED
+  PROPOSAL_SENT
+  CONVERTED
+  LOST
+}
+
+enum InvoiceStatus {
+  DRAFT
+  SENT
+  PAID
+  OVERDUE
+  CANCELLED
+}
+
+enum NotificationType {
+  BOOKING_CREATED
+  BOOKING_CONFIRMED
+  BOOKING_CANCELLED
+  CAMPAIGN_STATUS_CHANGE
+  CREATIVE_UPLOADED
+  CREATIVE_APPROVED
+  CREATIVE_REJECTED
+  CREATIVE_REVISION_REQUESTED
+  INVOICE_GENERATED
+  INVOICE_OVERDUE
+  PAYMENT_RECEIVED
+  RENTAL_EXPIRY_ALERT
+  HOLD_EXPIRING
+  HOLD_EXPIRED
+  PROPOSAL_READY
+  PROPOSAL_VIEWED
+  ENQUIRY_CREATED
+  ENQUIRY_CONVERTED
+}
+
+// ─── Models ──────────────────────────────────────────
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  password  String
+  name      String
+  phone     String?
+  role      UserRole
+  avatar    String?
+  isActive  Boolean  @default(true)
+  clientId  String?
+  client    Client?  @relation(fields: [clientId], references: [id])
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  assignedCampaigns Campaign[]    @relation("AssignedTo")
+  assignedEnquiries Enquiry[]     @relation("EnquiryAssignedTo")
+  notifications     Notification[]
+  chatSessions      ChatSession[]
+  fieldCheckins     FieldCheckin[]
+  uploadedCreatives Creative[]    @relation("UploadedBy")
+  reviewedCreatives Creative[]    @relation("ReviewedBy")
+  activityLogs      ActivityLog[] @relation("ActivityLogs")
+  savedFilters      SavedFilter[]
+  dashboardConfig   UserDashboardConfig?
+
+  @@map("users")
+}
+
+model Vendor {
+  id               String   @id @default(uuid())
+  name             String
+  contactPerson    String
+  email            String
+  phone            String
+  address          String
+  city             String
+  state            String
+  gstNumber        String?
+  panNumber        String?
+  reliabilityScore Int      @default(80)
+  isActive         Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  assets           Asset[]
+  rentalAgreements RentalAgreement[]
+
+  @@map("vendors")
+}
+
+model Client {
+  id            String   @id @default(uuid())
+  companyName   String
+  contactPerson String
+  email         String   @unique
+  phone         String
+  address       String
+  city          String
+  industry      String
+  gstNumber     String?
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  users         User[]
+  campaigns     Campaign[]
+  proposals     Proposal[]
+  invoices      Invoice[]
+  enquiries     Enquiry[]
+  chatSessions  ChatSession[]
+
+  @@map("clients")
+}
+
+model Asset {
+  id           String       @id @default(uuid())
+  code         String       @unique
+  name         String
+  type         AssetType
+  status       AssetStatus  @default(AVAILABLE)
+  address      String
+  city         String
+  state        String
+  latitude     Float
+  longitude    Float
+  width        Float
+  height       Float
+  lighting     LightingType
+  faces        Int          @default(1)
+  monthlyRate  Float
+  dailyRate    Float?
+  trafficCount Int?
+  landmark     String?
+  description  String?
+  score        Int?
+  scoreBreakdown Json?
+  vendorId     String
+  vendor       Vendor       @relation(fields: [vendorId], references: [id])
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  photos             AssetPhoto[]
+  availabilityBlocks AvailabilityBlock[]
+  bookings           Booking[]
+  creatives          Creative[]
+  fieldCheckins      FieldCheckin[]
+
+  @@index([city])
+  @@index([type])
+  @@index([status])
+  @@index([latitude, longitude])
+  @@map("assets")
+}
+
+model AssetPhoto {
+  id        String   @id @default(uuid())
+  assetId   String
+  asset     Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  url       String
+  caption   String?
+  isPrimary Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("asset_photos")
+}
+
+model RentalAgreement {
+  id              String   @id @default(uuid())
+  assetId         String
+  vendorId        String
+  vendor          Vendor   @relation(fields: [vendorId], references: [id])
+  startDate       DateTime
+  endDate         DateTime
+  monthlyRent     Float
+  securityDeposit Float
+  agreementUrl    String?
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@map("rental_agreements")
+}
+
+model AvailabilityBlock {
+  id        String   @id @default(uuid())
+  assetId   String
+  asset     Asset    @relation(fields: [assetId], references: [id])
+  startDate DateTime
+  endDate   DateTime
+  bookingId String?
+  reason    String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([assetId, startDate, endDate])
+  @@map("availability_blocks")
+}
+
+model Campaign {
+  id           String         @id @default(uuid())
+  name         String
+  clientId     String
+  client       Client         @relation(fields: [clientId], references: [id])
+  status       CampaignStatus @default(DRAFT)
+  startDate    DateTime
+  endDate      DateTime
+  totalBudget  Float
+  description  String?
+  assignedToId String?
+  assignedTo   User?          @relation("AssignedTo", fields: [assignedToId], references: [id])
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  bookings  Booking[]
+  proposals Proposal[]
+  invoices  Invoice[]
+  analytics CampaignAnalytics[]
+  enquiries Enquiry[]
+
+  @@index([clientId])
+  @@index([status])
+  @@map("campaigns")
+}
+
+model Booking {
+  id            String        @id @default(uuid())
+  campaignId    String
+  campaign      Campaign      @relation(fields: [campaignId], references: [id])
+  assetId       String
+  asset         Asset         @relation(fields: [assetId], references: [id])
+  startDate     DateTime
+  endDate       DateTime
+  status        BookingStatus @default(HOLD)
+  amount        Float
+  holdExpiresAt DateTime?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  creatives Creative[]
+  analytics CampaignAnalytics[]
+
+  @@index([assetId, startDate, endDate])
+  @@index([campaignId])
+  @@index([status])
+  @@map("bookings")
+}
+
+model Proposal {
+  id            String         @id @default(uuid())
+  campaignId    String?
+  campaign      Campaign?      @relation(fields: [campaignId], references: [id])
+  clientId      String
+  client        Client         @relation(fields: [clientId], references: [id])
+  title         String
+  description   String
+  totalBudget   Float
+  assets        Json           // ProposalAsset[]
+  pdfUrl        String?
+  status        ProposalStatus @default(DRAFT)
+  validUntil    DateTime?
+  sentAt        DateTime?
+  viewedAt      DateTime?
+  chatSessionId String?
+  enquiryId     String?
+  enquiry       Enquiry?       @relation(fields: [enquiryId], references: [id])
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  @@map("proposals")
+}
+
+model Creative {
+  id              String         @id @default(uuid())
+  bookingId       String
+  booking         Booking        @relation(fields: [bookingId], references: [id])
+  assetId         String
+  asset           Asset          @relation(fields: [assetId], references: [id])
+  fileUrl         String
+  fileName        String
+  fileType        String
+  status          CreativeStatus @default(PENDING)
+  rejectionReason String?
+  uploadedById    String
+  uploadedBy      User           @relation("UploadedBy", fields: [uploadedById], references: [id])
+  reviewedById    String?
+  reviewedBy      User?          @relation("ReviewedBy", fields: [reviewedById], references: [id])
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  @@map("creatives")
+}
+
+model Invoice {
+  id            String        @id @default(uuid())
+  invoiceNumber String        @unique
+  campaignId    String
+  campaign      Campaign      @relation(fields: [campaignId], references: [id])
+  clientId      String
+  client        Client        @relation(fields: [clientId], references: [id])
+  amount        Float
+  tax           Float
+  totalAmount   Float
+  status        InvoiceStatus @default(DRAFT)
+  dueDate       DateTime
+  paidAt        DateTime?
+  paymentMethod String?
+  paymentRef    String?
+  notes         String?
+  pdfUrl        String?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  @@index([clientId])
+  @@index([status])
+  @@map("invoices")
+}
+
+model Enquiry {
+  id              String        @id @default(uuid())
+  companyName     String
+  contactPerson   String
+  email           String
+  phone           String
+  industry        String?
+  cities          Json          @default("[]")
+  assetTypes      Json          @default("[]")
+  budget          Float?
+  startDate       DateTime?
+  endDate         DateTime?
+  requirements    String?
+  status          EnquiryStatus @default(NEW)
+  priority        String        @default("MEDIUM")
+  source          String?
+  assignedToId    String?
+  assignedTo      User?         @relation("EnquiryAssignedTo", fields: [assignedToId], references: [id])
+  clientId        String?
+  client          Client?       @relation(fields: [clientId], references: [id])
+  campaignId      String?
+  campaign        Campaign?     @relation(fields: [campaignId], references: [id])
+  convertedAt     DateTime?
+  lostReason      String?
+  notes           Json          @default("[]")
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  proposals       Proposal[]
+
+  @@index([status])
+  @@index([assignedToId])
+  @@map("enquiries")
+}
+
+model Notification {
+  id        String           @id @default(uuid())
+  userId    String
+  user      User             @relation(fields: [userId], references: [id])
+  type      NotificationType
+  title     String
+  message   String
+  isRead    Boolean          @default(false)
+  metadata  Json?
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+
+  @@index([userId, isRead])
+  @@map("notifications")
+}
+
+model CampaignAnalytics {
+  id          String   @id @default(uuid())
+  campaignId  String
+  campaign    Campaign @relation(fields: [campaignId], references: [id])
+  bookingId   String
+  booking     Booking  @relation(fields: [bookingId], references: [id])
+  date        DateTime
+  impressions Int      @default(0)
+  reach       Int      @default(0)
+  cpm         Float    @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([bookingId, date])
+  @@map("campaign_analytics")
+}
+
+model ChatSession {
+  id         String   @id @default(uuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id])
+  clientId   String?
+  client     Client?  @relation(fields: [clientId], references: [id])
+  stage      Int      @default(1)
+  stageData  Json     @default("{}")
+  messages   Json     @default("[]")
+  isComplete Boolean  @default(false)
+  proposalId String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@map("chat_sessions")
+}
+
+model ActivityLog {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation("ActivityLogs", fields: [userId], references: [id])
+  action    String   // CREATE, UPDATE, DELETE, STATUS_CHANGE, LOGIN, EXPORT, etc.
+  entity    String   // Asset, Campaign, Booking, Invoice, Creative, etc.
+  entityId  String?
+  metadata  Json?    // { before, after, description }
+  ipAddress String?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([entity, entityId])
+  @@index([createdAt])
+  @@map("activity_logs")
+}
+
+model FieldCheckin {
+  id        String   @id @default(uuid())
+  assetId   String
+  asset     Asset    @relation(fields: [assetId], references: [id])
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  latitude  Float
+  longitude Float
+  notes     String?
+  photoUrls Json     @default("[]")
+  condition String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("field_checkins")
+}
+
+model SavedFilter {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  name      String
+  entity    String
+  filters   Json
+  isDefault Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, name, entity])
+  @@index([userId, entity])
+  @@map("saved_filters")
+}
+
+model UserDashboardConfig {
+  id        String   @id @default(uuid())
+  userId    String   @unique
+  user      User     @relation(fields: [userId], references: [id])
+  widgets   Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("user_dashboard_configs")
+}
+
+model AiInsight {
+  id          String   @id @default(uuid())
+  type        String   // revenue, occupancy, enquiry, campaign, asset, forecast, anomaly
+  title       String
+  summary     String
+  details     Json?    // Full analysis data
+  severity    String   @default("info") // info, warning, critical, opportunity
+  actionable  Boolean  @default(true)
+  status      String   @default("NEW") // NEW, VIEWED, ACTED, DISMISSED
+  actedAt     DateTime?
+  dismissedAt DateTime?
+  metadata    Json?    // { metric, value, change, recommendation }
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([type])
+  @@index([status])
+  @@index([createdAt])
+  @@map("ai_insights")
+}
+
+model AiDecisionLog {
+  id         String   @id @default(uuid())
+  insightId  String?
+  action     String   // e.g., "auto_assign_enquiry", "risk_alert", "price_suggestion"
+  input      Json     // What data was provided
+  output     Json     // What the agent decided
+  outcome    String?  // POSITIVE, NEGATIVE, NEUTRAL — filled later
+  feedback   String?  // User feedback
+  confidence Float?   // 0-1
+  createdAt  DateTime @default(now())
+
+  @@index([action])
+  @@index([createdAt])
+  @@map("ai_decision_logs")
+}

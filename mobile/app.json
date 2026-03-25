@@ -1,0 +1,29 @@
+{
+  "expo": {
+    "name": "AdVantage AI",
+    "slug": "advantage-ai",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "advantage",
+    "userInterfaceStyle": "automatic",
+    "splash": {
+      "backgroundColor": "#3b82f6"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.advantage.ai"
+    },
+    "android": {
+      "package": "com.advantage.ai",
+      "adaptiveIcon": {
+        "backgroundColor": "#3b82f6"
+      }
+    },
+    "plugins": [
+      "expo-router",
+      "expo-camera",
+      "expo-image-picker",
+      "expo-location"
+    ]
+  }
+}
